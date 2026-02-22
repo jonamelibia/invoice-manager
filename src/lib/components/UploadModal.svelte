@@ -1,5 +1,6 @@
 <script lang="ts">
     import { createEventDispatcher } from "svelte";
+    import { jsPDF } from "jspdf";
 
     let { show = false, targetFolderId, onClose, onUploadSuccess } = $props();
 
@@ -8,6 +9,99 @@
     let selectedFile = $state<File | null>(null);
     let uploadProgress = $state(0);
     let errorMsg = $state<string | null>(null);
+    let customFileName = $state("");
+
+    // Camera variables
+    let showCamera = $state(false);
+    let videoElement = $state<HTMLVideoElement | null>(null);
+    let mediaStream = $state<MediaStream | null>(null);
+
+    $effect(() => {
+        if (
+            videoElement &&
+            mediaStream &&
+            videoElement.srcObject !== mediaStream
+        ) {
+            videoElement.srcObject = mediaStream;
+        }
+    });
+
+    async function startCamera() {
+        errorMsg = null;
+        showCamera = true;
+        try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "environment" },
+                audio: false,
+            });
+        } catch (e: any) {
+            errorMsg =
+                "Error al iniciar la cámara: comprueba los permisos. (" +
+                e.message +
+                ")";
+            showCamera = false;
+        }
+    }
+
+    function stopCamera() {
+        if (mediaStream) {
+            mediaStream.getTracks().forEach((track) => track.stop());
+            mediaStream = null;
+        }
+        showCamera = false;
+    }
+
+    function takePhoto() {
+        if (!videoElement) return;
+        const canvas = document.createElement("canvas");
+        canvas.width = videoElement.videoWidth;
+        canvas.height = videoElement.videoHeight;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+            ctx.drawImage(videoElement, 0, 0);
+
+            try {
+                // Get the image data from canvas
+                const imgData = canvas.toDataURL("image/jpeg", 0.9);
+
+                // Initialize jsPDF matching the dimensions of the photo
+                const orientation =
+                    canvas.width > canvas.height ? "landscape" : "portrait";
+                const pdf = new jsPDF({
+                    orientation: orientation,
+                    unit: "px",
+                    format: [canvas.width, canvas.height],
+                });
+
+                // Add the image filling the entire page
+                pdf.addImage(
+                    imgData,
+                    "JPEG",
+                    0,
+                    0,
+                    canvas.width,
+                    canvas.height,
+                );
+
+                // Get the generated PDF as a Blob
+                const pdfBlob = pdf.output("blob");
+
+                // Construct a custom File with the correct mimeType
+                const file = new File(
+                    [pdfBlob],
+                    `factura-escaneada-${Date.now()}.pdf`,
+                    { type: "application/pdf" },
+                );
+
+                handleFileSelection(file);
+                stopCamera();
+            } catch (err: any) {
+                console.error("Error generating PDF:", err);
+                errorMsg =
+                    "Ups, hubo un error procesando el PDF: " + err.message;
+            }
+        }
+    }
 
     function handleDragOver(e: DragEvent) {
         e.preventDefault();
@@ -58,6 +152,7 @@
         }
 
         selectedFile = file;
+        customFileName = file.name;
     }
 
     async function uploadFile() {
@@ -67,7 +162,11 @@
         errorMsg = null;
 
         const formData = new FormData();
-        formData.append("file", selectedFile);
+        formData.append(
+            "file",
+            selectedFile,
+            customFileName || selectedFile.name,
+        );
         formData.append("folderId", targetFolderId);
 
         try {
@@ -116,6 +215,7 @@
     }
 
     function handleClose() {
+        stopCamera();
         selectedFile = null;
         uploadProgress = 0;
         errorMsg = null;
@@ -181,7 +281,53 @@
                     </div>
                 {/if}
 
-                {#if !selectedFile}
+                {#if showCamera}
+                    <!-- Visor de cámara in-app -->
+                    <div
+                        class="relative w-full bg-black rounded-xl overflow-hidden flex flex-col items-center justify-center border border-surface-glass-border shadow-lg min-h-[60vh] sm:min-h-[40vh]"
+                    >
+                        <!-- svelte-ignore a11y_media_has_caption -->
+                        <video
+                            bind:this={videoElement}
+                            autoplay
+                            playsinline
+                            class="w-full h-full object-cover"
+                        ></video>
+                        <div
+                            class="absolute bottom-6 left-0 right-0 flex items-center justify-center gap-8"
+                        >
+                            <button
+                                type="button"
+                                class="w-12 h-12 rounded-full bg-slate-800/80 backdrop-blur text-white flex items-center justify-center hover:bg-slate-700 transition"
+                                onclick={stopCamera}
+                                aria-label="Cancelar"
+                            >
+                                <svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    class="h-6 w-6"
+                                    fill="none"
+                                    viewBox="0 0 24 24"
+                                    stroke="currentColor"
+                                >
+                                    <path
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        stroke-width="2"
+                                        d="M6 18L18 6M6 6l12 12"
+                                    />
+                                </svg>
+                            </button>
+                            <button
+                                type="button"
+                                class="w-16 h-16 rounded-full bg-white border-4 border-slate-300 shadow-xl hover:scale-105 transition"
+                                onclick={takePhoto}
+                                aria-label="Capturar"
+                            ></button>
+                            <div class="w-12 h-12"></div>
+                            <!-- Spacer for balance -->
+                        </div>
+                    </div>
+                {:else if !selectedFile}
                     <!-- Drop area -->
                     <div
                         class="border-2 border-dashed rounded-xl p-8 text-center flex flex-col items-center justify-center transition-colors {isDragging
@@ -217,9 +363,11 @@
                         </p>
 
                         <div class="flex gap-3">
-                            <!-- Botón escáner (móvil) -->
-                            <label
+                            <!-- Botón escáner in-app -->
+                            <button
+                                type="button"
                                 class="btn btn-secondary flex items-center gap-2 cursor-pointer text-sm"
+                                onclick={startCamera}
                             >
                                 <svg
                                     xmlns="http://www.w3.org/2000/svg"
@@ -241,14 +389,7 @@
                                     />
                                 </svg>
                                 Escanear
-                                <input
-                                    type="file"
-                                    accept="image/*"
-                                    capture="environment"
-                                    class="hidden"
-                                    onchange={handleFileInput}
-                                />
-                            </label>
+                            </button>
 
                             <!-- Botón seleccionar normal -->
                             <label
@@ -319,12 +460,15 @@
                                     </svg>
                                 {/if}
                             </div>
-                            <div class="flex flex-col flex-1 min-w-0">
-                                <span
-                                    class="text-white font-medium truncate text-sm"
-                                    >{selectedFile.name}</span
-                                >
-                                <span class="text-slate-400 text-xs mt-0.5"
+                            <div class="flex flex-col flex-1 min-w-0 pr-2">
+                                <input
+                                    type="text"
+                                    bind:value={customFileName}
+                                    class="text-white font-medium text-sm bg-transparent border-b border-transparent hover:border-surface-glass-border focus:border-brand-500 focus:outline-none w-full transition-colors pb-0.5"
+                                    placeholder="Nombre del archivo"
+                                    disabled={isUploading}
+                                />
+                                <span class="text-slate-400 text-xs mt-1"
                                     >{(selectedFile.size / 1024 / 1024).toFixed(
                                         2,
                                     )} MB</span

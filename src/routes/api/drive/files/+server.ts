@@ -7,27 +7,35 @@ export async function GET({ url, locals }: RequestEvent) {
         throw error(401, 'Unauthorized');
     }
 
+    // Support both old API (year/month/type) and new API (folderId)
+    const folderId = url.searchParams.get('folderId');
     const year = url.searchParams.get('year');
     const month = url.searchParams.get('month');
-    const type = url.searchParams.get('type') as 'facturas_emitidas' | 'facturas_recibidas';
-
-    if (!year || !month || !type) {
-        throw error(400, 'Missing required parameters: year, month, type');
-    }
+    const type = url.searchParams.get('type') as 'facturas_emitidas' | 'facturas_recibidas' | null;
 
     try {
-        // Encontraremos o crearemos la ruta facturas > año > mes > tipo
-        const folderId = await getOrCreateDeepFolder(locals.drive, year, month, type);
+        let targetFolderId: string;
 
-        // Obtenemos los archivos dentro de esa ruta
-        const files = await getFilesInFolder(locals.drive, folderId);
+        if (folderId) {
+            // New API: direct folder ID
+            targetFolderId = folderId;
+        } else if (year && month && type) {
+            // Legacy API: build path
+            targetFolderId = await getOrCreateDeepFolder(locals.drive, year, month, type);
+        } else {
+            throw error(400, 'Missing required parameters: folderId or (year, month, type)');
+        }
+
+        // Get files in the folder
+        const files = await getFilesInFolder(locals.drive, targetFolderId);
 
         return json({
-            folderId,
+            folderId: targetFolderId,
             files
         });
     } catch (e: any) {
         console.error("Error fetching files from Drive API:", e);
+        if (e.status) throw e; // Re-throw SvelteKit errors
         throw error(500, `Failed to fetch files from Google Drive: ${e.message}`);
     }
 }
