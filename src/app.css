@@ -1,0 +1,37 @@
+/* Vanilla CSS styles for Glassmorphism and modern UI */
+@import "tailwindcss";
+
+@theme {
+  --color-brand-50: #eff6ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-500: #3b82f6;
+  --color-brand-600: #2563eb;
+
+  --color-surface-bg: #0f172a;
+  --color-surface-glass: rgba(255, 255, 255, 0.05);
+  --color-surface-glass-border: rgba(255, 255, 255, 0.1);
+}
+
+@layer base {
+  body {
+    @apply bg-surface-bg text-slate-50 antialiased min-h-screen flex flex-col;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-surface-glass backdrop-blur-md border border-surface-glass-border shadow-lg rounded-xl;
+  }
+
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
+  }
+
+  .btn-primary {
+    @apply bg-brand-500 text-white hover:bg-brand-600;
+  }
+
+  .btn-secondary {
+    @apply bg-white/10 text-white hover:bg-white/20;
+  }
+}
