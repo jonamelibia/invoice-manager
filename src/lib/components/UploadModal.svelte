@@ -32,29 +32,30 @@
     }
 
     function findPaperContour(cv: any, img: any) {
-        let imgGray = new cv.Mat();
-        let imgBlur = new cv.Mat();
-        let imgThresh = new cv.Mat();
-        let imgMorphed = new cv.Mat();
+        const imgGray = new cv.Mat();
+        const imgEqualized = new cv.Mat();
+        const imgBlur = new cv.Mat();
+        const imgThresh = new cv.Mat();
+        const imgMorphed = new cv.Mat();
         
         try {
-            // 1. Convert to gray and increase contrast for better edge detection
+            // 1. Convert to gray and apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+            // This is "AI-like" behavior for handling different lighting/shadows
             cv.cvtColor(img, imgGray, cv.COLOR_RGBA2GRAY);
+            const clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+            clahe.apply(imgGray, imgEqualized);
+            clahe.delete();
             
-            // Apply slight contrast boost before edge detection
-            // cv.convertScaleAbs(imgGray, imgGray, 1.2, 10);
+            // 2. Strong Bilateral Filter to wipe noise
+            cv.bilateralFilter(imgEqualized, imgBlur, 9, 75, 75, cv.BORDER_DEFAULT);
             
-            // 2. Strong Bilateral Filter to remove noise while keeping edges sharp
-            cv.bilateralFilter(imgGray, imgBlur, 9, 75, 75, cv.BORDER_DEFAULT);
-            
-            // 3. Adaptive Thresholding to handle shadows and different lighting conditions
-            // This is MORE ROBUST than Canny for documents on medium-contrast backgrounds
+            // 3. Multi-threshold approach: Adaptive thresholding is best for paper
             cv.adaptiveThreshold(imgBlur, imgThresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2);
             
-            // 4. Invert and Morphological Closing to fill the "insides" of the paper
-            cv.bitwise_not(imgThresh, imgThresh);
+            // 4. Fill gaps and smooth edges
             const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
             cv.morphologyEx(imgThresh, imgMorphed, cv.MORPH_CLOSE, kernel);
+            cv.bitwise_not(imgMorphed, imgMorphed);
             
             let contours = new cv.MatVector();
             let hierarchy = new cv.Mat();
@@ -62,77 +63,61 @@
 
             let maxArea = 0;
             let maxContour = null;
-
-            // Paper should be at least 5% of the total area
-            const minArea = (img.cols * img.rows) * 0.05;
+            const totalArea = img.cols * img.rows;
 
             for (let i = 0; i < contours.size(); ++i) {
-                let cnt = contours.get(i);
-                let area = cv.contourArea(cnt);
+                const cnt = contours.get(i);
+                const area = cv.contourArea(cnt);
                 
-                if (area > minArea && area > maxArea) {
-                    let peri = cv.arcLength(cnt, true);
-                    let approx = new cv.Mat();
-                    // DP Algorithm to simplify the contour to its main vertexes
-                    cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-                    
-                    // We prioritize 4-cornered shapes (quadrilaterals)
-                    if (approx.rows === 4) {
+                // Ignore small noise (less than 10% of image)
+                if (area < totalArea * 0.1) continue;
+
+                const peri = cv.arcLength(cnt, true);
+                const approx = new cv.Mat();
+                cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+                
+                // We want specifically 4 corners, but also checking for "boxiness"
+                if (approx.rows === 4 && cv.isContourConvex(approx)) {
+                    if (area > maxArea) {
                         maxArea = area;
                         if (maxContour) maxContour.delete();
                         maxContour = approx;
-                    } else if (!maxContour) {
-                        // If no 4-point shape found yet, take the largest shape as fallback
-                        maxArea = area;
-                        maxContour = cnt.clone();
+                    } else {
+                        approx.delete();
                     }
-                    if (approx !== maxContour) approx.delete();
+                } else {
+                    approx.delete();
                 }
             }
 
             contours.delete(); hierarchy.delete(); kernel.delete();
             return maxContour;
         } catch (e) {
-            console.error("Algo falló en el análisis de imagen:", e);
+            console.error("Critical error in document detection:", e);
             return null;
         } finally {
-            imgGray.delete(); imgBlur.delete(); imgThresh.delete(); imgMorphed.delete();
+            imgGray.delete(); imgEqualized.delete(); imgBlur.delete(); imgThresh.delete(); imgMorphed.delete();
         }
     }
 
     function getCornerPoints(cv: any, contour: any) {
-        let points: {x:number, y:number}[] = [];
-        
-        if (contour.rows === 4) {
-            // Case 1: We have 4 vertices from approximation
-            for (let i = 0; i < 4; i++) {
-                points.push({ x: contour.data32S[i * 2], y: contour.data32S[i * 2 + 1] });
-            }
-        } else {
-            // Case 2: We have a complex blob, get the bounding corners of its minimum area rectangle
-            let rect = cv.minAreaRect(contour);
-            let vertices = cv.rotatedRectPoints(rect);
-            for (let i = 0; i < 4; i++) {
-                points.push({ x: vertices[i].x, y: vertices[i].y });
-            }
+        let pts: {x:number, y:number}[] = [];
+        for (let i = 0; i < contour.rows; i++) {
+            pts.push({ x: contour.data32S[i * 2], y: contour.data32S[i * 2 + 1] });
         }
 
-        // --- Sophisticated Sorting ---
-        // 1. Sort by Y to separate top from bottom
-        points.sort((a, b) => a.y - b.y);
-        let top = points.slice(0, 2);
-        let bottom = points.slice(2, 4);
+        /**
+         * Geometric Sorting (Algorithm: Sum and Difference)
+         * TL: min(x+y) | BR: max(x+y)
+         * TR: min(y-x) | BL: max(y-x)
+         * This is much more robust for rotations than simple Y-sorting
+         */
+        const tl = pts.reduce((p, c) => (c.x + c.y < p.x + p.y ? c : p), pts[0]);
+        const br = pts.reduce((p, c) => (c.x + c.y > p.x + p.y ? c : p), pts[0]);
+        const tr = pts.reduce((p, c) => (c.y - c.x < p.y - p.x ? c : p), pts[0]);
+        const bl = pts.reduce((p, c) => (c.y - c.x > p.y - p.x ? c : p), pts[0]);
 
-        // 2. Sort sub-groups by X to find left and right
-        top.sort((a, b) => a.x - b.x);
-        bottom.sort((a, b) => a.x - b.x);
-
-        return {
-            tl: top[0],
-            tr: top[1],
-            bl: bottom[0],
-            br: bottom[1]
-        };
+        return { tl, tr, bl, br };
     }
 
     function extractPaper(cv: any, image: HTMLImageElement, resultWidth: number, resultHeight: number, cornerPoints: any) {
@@ -193,13 +178,17 @@
             
             if (maxContour) {
                 const corners = getCornerPoints(cv, maxContour);
-                if (corners.tl && corners.tr && corners.bl && corners.br) {
-                    ptTopLeft = { x: corners.tl.x / img.cols, y: corners.tl.y / img.rows };
-                    ptTopRight = { x: corners.tr.x / img.cols, y: corners.tr.y / img.rows };
-                    ptBottomLeft = { x: corners.bl.x / img.cols, y: corners.bl.y / img.rows };
-                    ptBottomRight = { x: corners.br.x / img.cols, y: corners.br.y / img.rows };
-                }
+                ptTopLeft = { x: corners.tl.x / img.cols, y: corners.tl.y / img.rows };
+                ptTopRight = { x: corners.tr.x / img.cols, y: corners.tr.y / img.rows };
+                ptBottomLeft = { x: corners.bl.x / img.cols, y: corners.bl.y / img.rows };
+                ptBottomRight = { x: corners.br.x / img.cols, y: corners.br.y / img.rows };
                 maxContour.delete();
+            } else {
+                // Fallback: centered rectangle if detection fails completely
+                ptTopLeft = {x: 0.1, y: 0.1};
+                ptTopRight = {x: 0.9, y: 0.1};
+                ptBottomLeft = {x: 0.1, y: 0.9};
+                ptBottomRight = {x: 0.9, y: 0.9};
             }
             img.delete();
         } catch (e) {
