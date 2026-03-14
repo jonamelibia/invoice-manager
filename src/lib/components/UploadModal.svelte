@@ -1,8 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher } from "svelte";
     import { jsPDF } from "jspdf";
-    import Cropper from "cropperjs";
-    import "cropperjs/dist/cropper.css";
+    import jscanify from "jscanify";
 
     let { show = false, targetFolderId, onClose, onUploadSuccess } = $props();
 
@@ -18,11 +17,17 @@
     let videoElement = $state<HTMLVideoElement | null>(null);
     let mediaStream = $state<MediaStream | null>(null);
 
-    // Cropper variables
+    // Scanner / Perspective Cropper variables
     let showCropper = $state(false);
     let cropImageSrc = $state<string | null>(null);
     let cropperElement = $state<HTMLImageElement | null>(null);
-    let cropperInstance = $state<Cropper | null>(null);
+    
+    // Corners are relative to image dimensions (0.0 to 1.0)
+    let ptTopLeft = $state({x: 0.1, y: 0.1});
+    let ptTopRight = $state({x: 0.9, y: 0.1});
+    let ptBottomLeft = $state({x: 0.1, y: 0.9});
+    let ptBottomRight = $state({x: 0.9, y: 0.9});
+    let activePoint = $state<'tl'|'tr'|'bl'|'br'|null>(null);
 
     $effect(() => {
         if (
@@ -34,24 +39,47 @@
         }
     });
 
-    $effect(() => {
-        if (showCropper && cropperElement && cropImageSrc) {
-            cropperInstance = new Cropper(cropperElement, {
-                viewMode: 1,
-                autoCropArea: 0.9,
-                responsive: true,
-                restore: false,
-                background: false,
-            });
-
-            return () => {
-                if (cropperInstance) {
-                    cropperInstance.destroy();
-                    cropperInstance = null;
+    function initScannerOverlay() {
+        if (!cropperElement || !(window as any).cvReady) return;
+        try {
+            const scanner = new jscanify();
+            const img = (window as any).cv.imread(cropperElement);
+            const maxContour = scanner.findPaperContour(img);
+            if (maxContour) {
+                const corners = scanner.getCornerPoints(maxContour);
+                if (corners && corners.topLeftCorner) {
+                     ptTopLeft = { x: corners.topLeftCorner.x / img.cols, y: corners.topLeftCorner.y / img.rows };
+                     ptTopRight = { x: corners.topRightCorner.x / img.cols, y: corners.topRightCorner.y / img.rows };
+                     ptBottomLeft = { x: corners.bottomLeftCorner.x / img.cols, y: corners.bottomLeftCorner.y / img.rows };
+                     ptBottomRight = { x: corners.bottomRightCorner.x / img.cols, y: corners.bottomRightCorner.y / img.rows };
                 }
-            };
+            }
+            img.delete();
+        } catch (e) {
+            console.error("No se pudo autodetectar el borde:", e);
         }
-    });
+    }
+
+    // Pointer events for dragging
+    function handlePointerMove(e: PointerEvent) {
+        if (!activePoint || !cropperElement) return;
+        const rect = cropperElement.getBoundingClientRect();
+        
+        // Calculate percentages
+        let nx = (e.clientX - rect.left) / rect.width;
+        let ny = (e.clientY - rect.top) / rect.height;
+        nx = Math.max(0, Math.min(1, nx));
+        ny = Math.max(0, Math.min(1, ny));
+
+        if (activePoint === 'tl') ptTopLeft = {x: nx, y: ny};
+        if (activePoint === 'tr') ptTopRight = {x: nx, y: ny};
+        if (activePoint === 'bl') ptBottomLeft = {x: nx, y: ny};
+        if (activePoint === 'br') ptBottomRight = {x: nx, y: ny};
+    }
+
+    function handlePointerUp() {
+        activePoint = null;
+    }
 
     async function startCamera() {
         errorMsg = null;
@@ -106,46 +134,56 @@
         startCamera();
     }
 
-    function confirmCrop() {
-        if (!cropperInstance) return;
+    async function confirmCrop() {
+        if (!cropperElement) return;
         
         try {
-            const croppedCanvas = cropperInstance.getCroppedCanvas();
-            if (!croppedCanvas) return;
-            
-            const imgData = croppedCanvas.toDataURL("image/jpeg", 0.9);
+            if (!(window as any).cvReady) {
+                throw new Error("El motor de escaneo (OpenCV) aún no ha cargado. Por favor espera unos segundos.");
+            }
+            const imgEl = new Image();
+            imgEl.src = cropImageSrc!;
+            await new Promise(r => imgEl.onload = r);
 
-            // Initialize jsPDF matching the dimensions of the photo
-            const orientation =
-                croppedCanvas.width > croppedCanvas.height ? "landscape" : "portrait";
+            const scanner = new jscanify();
+            const w = imgEl.width;
+            const h = imgEl.height;
+
+            const customCorners = {
+                topLeftCorner: { x: ptTopLeft.x * w, y: ptTopLeft.y * h },
+                topRightCorner: { x: ptTopRight.x * w, y: ptTopRight.y * h },
+                bottomLeftCorner: { x: ptBottomLeft.x * w, y: ptBottomLeft.y * h },
+                bottomRightCorner: { x: ptBottomRight.x * w, y: ptBottomRight.y * h },
+            };
+
+            const dt = (p1x: number, p1y: number, p2x: number, p2y: number) => Math.hypot(p1x-p2x, p1y-p2y);
+            const w1 = dt(customCorners.topLeftCorner.x, customCorners.topLeftCorner.y, customCorners.topRightCorner.x, customCorners.topRightCorner.y);
+            const w2 = dt(customCorners.bottomLeftCorner.x, customCorners.bottomLeftCorner.y, customCorners.bottomRightCorner.x, customCorners.bottomRightCorner.y);
+            const resultWidth = Math.max(w1, w2);
+
+            const h1 = dt(customCorners.topLeftCorner.x, customCorners.topLeftCorner.y, customCorners.bottomLeftCorner.x, customCorners.bottomLeftCorner.y);
+            const h2 = dt(customCorners.topRightCorner.x, customCorners.topRightCorner.y, customCorners.bottomRightCorner.x, customCorners.bottomRightCorner.y);
+            const resultHeight = Math.max(h1, h2);
+
+            const resultCanvas = scanner.extractPaper(imgEl, resultWidth, resultHeight, customCorners);
+            
+            if (!resultCanvas) throw new Error("Fallo al recortar, intenta de nuevo ajustando los puntos.");
+
+            const imgData = resultCanvas.toDataURL("image/jpeg", 0.9);
+
+            const orientation = resultWidth > resultHeight ? "landscape" : "portrait";
             const pdf = new jsPDF({
                 orientation: orientation,
                 unit: "px",
-                format: [croppedCanvas.width, croppedCanvas.height],
+                format: [resultWidth, resultHeight],
             });
 
-            // Add the image filling the entire page
-            pdf.addImage(
-                imgData,
-                "JPEG",
-                0,
-                0,
-                croppedCanvas.width,
-                croppedCanvas.height,
-            );
-
-            // Get the generated PDF as a Blob
+            pdf.addImage(imgData, "JPEG", 0, 0, resultWidth, resultHeight);
             const pdfBlob = pdf.output("blob");
 
-            // Construct a custom File with the correct mimeType
-            const file = new File(
-                [pdfBlob],
-                `factura-escaneada-${Date.now()}.pdf`,
-                { type: "application/pdf" },
-            );
+            const file = new File([pdfBlob], `factura-escaneada-${Date.now()}.pdf`, { type: "application/pdf" });
 
             handleFileSelection(file);
-            
             showCropper = false;
             cropImageSrc = null;
         } catch (err: any) {
@@ -267,10 +305,6 @@
 
     function handleClose() {
         stopCamera();
-        if (cropperInstance) {
-            cropperInstance.destroy();
-            cropperInstance = null;
-        }
         showCropper = false;
         cropImageSrc = null;
         selectedFile = null;
@@ -279,6 +313,8 @@
         onClose?.();
     }
 </script>
+
+<svelte:window onpointermove={handlePointerMove} onpointerup={handlePointerUp} />
 
 {#if show}
     <div
@@ -388,16 +424,37 @@
                     <!-- Visor de recorte de la imagen -->
                     <div class="flex flex-col gap-4">
                         <div
-                            class="relative w-full bg-black rounded-xl overflow-hidden border border-surface-glass-border shadow-lg min-h-[50vh] flex items-center justify-center"
+                            class="relative w-full bg-black rounded-xl border border-surface-glass-border shadow-lg min-h-[50vh] flex items-center justify-center select-none overflow-hidden"
+                            style="touch-action: none;"
                         >
-                            <img
-                                bind:this={cropperElement}
-                                src={cropImageSrc}
-                                alt="Recortar imagen"
-                                class="max-w-full max-h-[50vh] block"
-                            />
+                            <div class="relative w-full max-w-full inline-block leading-none">
+                                <img
+                                    bind:this={cropperElement}
+                                    src={cropImageSrc}
+                                    alt="Recortar imagen"
+                                    class="w-full h-auto block select-none pointer-events-none"
+                                    onload={initScannerOverlay}
+                                    crossorigin="anonymous"
+                                />
+                                
+                                <!-- Polygon connecting points -->
+                                <svg class="absolute inset-0 w-full h-full pointer-events-none" preserveAspectRatio="none">
+                                    <polygon 
+                                        points="{ptTopLeft.x*100}%,{ptTopLeft.y*100}% {ptTopRight.x*100}%,{ptTopRight.y*100}% {ptBottomRight.x*100}%,{ptBottomRight.y*100}% {ptBottomLeft.x*100}%,{ptBottomLeft.y*100}%"
+                                        fill="rgba(14, 165, 233, 0.2)"
+                                        stroke="#0ea5e9"
+                                        stroke-width="2"
+                                    />
+                                </svg>
+                                
+                                <!-- Drag handles -->
+                                <div class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" style="left: {ptTopLeft.x*100}%; top: {ptTopLeft.y*100}%" onpointerdown={(e) => { e.preventDefault(); activePoint = 'tl'; }}></div>
+                                <div class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" style="left: {ptTopRight.x*100}%; top: {ptTopRight.y*100}%" onpointerdown={(e) => { e.preventDefault(); activePoint = 'tr'; }}></div>
+                                <div class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" style="left: {ptBottomLeft.x*100}%; top: {ptBottomLeft.y*100}%" onpointerdown={(e) => { e.preventDefault(); activePoint = 'bl'; }}></div>
+                                <div class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" style="left: {ptBottomRight.x*100}%; top: {ptBottomRight.y*100}%" onpointerdown={(e) => { e.preventDefault(); activePoint = 'br'; }}></div>
+                            </div>
                         </div>
-                        <p class="text-sm text-center text-slate-400">Ajusta los bordes del documento</p>
+                        <p class="text-sm text-center text-slate-400">Ajusta los 4 bordes del documento</p>
                         <div class="flex gap-3 justify-end mt-2">
                             <button
                                 class="btn btn-secondary text-sm px-6"
@@ -406,7 +463,7 @@
                             <button
                                 class="btn btn-primary text-sm px-6 font-semibold"
                                 onclick={confirmCrop}
-                                >Confirmar Recorte</button
+                                >Confirmar Escáner</button
                             >
                         </div>
                     </div>
