@@ -1,6 +1,8 @@
 <script lang="ts">
     import { createEventDispatcher } from "svelte";
     import { jsPDF } from "jspdf";
+    import Cropper from "cropperjs";
+    import "cropperjs/dist/cropper.css";
 
     let { show = false, targetFolderId, onClose, onUploadSuccess } = $props();
 
@@ -16,6 +18,12 @@
     let videoElement = $state<HTMLVideoElement | null>(null);
     let mediaStream = $state<MediaStream | null>(null);
 
+    // Cropper variables
+    let showCropper = $state(false);
+    let cropImageSrc = $state<string | null>(null);
+    let cropperElement = $state<HTMLImageElement | null>(null);
+    let cropperInstance = $state<Cropper | null>(null);
+
     $effect(() => {
         if (
             videoElement &&
@@ -23,6 +31,25 @@
             videoElement.srcObject !== mediaStream
         ) {
             videoElement.srcObject = mediaStream;
+        }
+    });
+
+    $effect(() => {
+        if (showCropper && cropperElement && cropImageSrc) {
+            cropperInstance = new Cropper(cropperElement, {
+                viewMode: 1,
+                autoCropArea: 0.9,
+                responsive: true,
+                restore: false,
+                background: false,
+            });
+
+            return () => {
+                if (cropperInstance) {
+                    cropperInstance.destroy();
+                    cropperInstance = null;
+                }
+            };
         }
     });
 
@@ -62,44 +89,68 @@
 
             try {
                 // Get the image data from canvas
-                const imgData = canvas.toDataURL("image/jpeg", 0.9);
-
-                // Initialize jsPDF matching the dimensions of the photo
-                const orientation =
-                    canvas.width > canvas.height ? "landscape" : "portrait";
-                const pdf = new jsPDF({
-                    orientation: orientation,
-                    unit: "px",
-                    format: [canvas.width, canvas.height],
-                });
-
-                // Add the image filling the entire page
-                pdf.addImage(
-                    imgData,
-                    "JPEG",
-                    0,
-                    0,
-                    canvas.width,
-                    canvas.height,
-                );
-
-                // Get the generated PDF as a Blob
-                const pdfBlob = pdf.output("blob");
-
-                // Construct a custom File with the correct mimeType
-                const file = new File(
-                    [pdfBlob],
-                    `factura-escaneada-${Date.now()}.pdf`,
-                    { type: "application/pdf" },
-                );
-
-                handleFileSelection(file);
+                cropImageSrc = canvas.toDataURL("image/jpeg", 1.0);
                 stopCamera();
+                showCropper = true;
             } catch (err: any) {
-                console.error("Error generating PDF:", err);
+                console.error("Error capturing photo:", err);
                 errorMsg =
-                    "Ups, hubo un error procesando el PDF: " + err.message;
+                    "Ups, hubo un error capturando la foto: " + err.message;
             }
+        }
+    }
+
+    function cancelCrop() {
+        showCropper = false;
+        cropImageSrc = null;
+        startCamera();
+    }
+
+    function confirmCrop() {
+        if (!cropperInstance) return;
+        
+        try {
+            const croppedCanvas = cropperInstance.getCroppedCanvas();
+            if (!croppedCanvas) return;
+            
+            const imgData = croppedCanvas.toDataURL("image/jpeg", 0.9);
+
+            // Initialize jsPDF matching the dimensions of the photo
+            const orientation =
+                croppedCanvas.width > croppedCanvas.height ? "landscape" : "portrait";
+            const pdf = new jsPDF({
+                orientation: orientation,
+                unit: "px",
+                format: [croppedCanvas.width, croppedCanvas.height],
+            });
+
+            // Add the image filling the entire page
+            pdf.addImage(
+                imgData,
+                "JPEG",
+                0,
+                0,
+                croppedCanvas.width,
+                croppedCanvas.height,
+            );
+
+            // Get the generated PDF as a Blob
+            const pdfBlob = pdf.output("blob");
+
+            // Construct a custom File with the correct mimeType
+            const file = new File(
+                [pdfBlob],
+                `factura-escaneada-${Date.now()}.pdf`,
+                { type: "application/pdf" },
+            );
+
+            handleFileSelection(file);
+            
+            showCropper = false;
+            cropImageSrc = null;
+        } catch (err: any) {
+            console.error("Error cropping image:", err);
+            errorMsg = "Ups, hubo un error procesando el recorte: " + err.message;
         }
     }
 
@@ -216,6 +267,12 @@
 
     function handleClose() {
         stopCamera();
+        if (cropperInstance) {
+            cropperInstance.destroy();
+            cropperInstance = null;
+        }
+        showCropper = false;
+        cropImageSrc = null;
         selectedFile = null;
         uploadProgress = 0;
         errorMsg = null;
@@ -325,6 +382,32 @@
                             ></button>
                             <div class="w-12 h-12"></div>
                             <!-- Spacer for balance -->
+                        </div>
+                    </div>
+                {:else if showCropper && cropImageSrc}
+                    <!-- Visor de recorte de la imagen -->
+                    <div class="flex flex-col gap-4">
+                        <div
+                            class="relative w-full bg-black rounded-xl overflow-hidden border border-surface-glass-border shadow-lg min-h-[50vh] flex items-center justify-center"
+                        >
+                            <img
+                                bind:this={cropperElement}
+                                src={cropImageSrc}
+                                alt="Recortar imagen"
+                                class="max-w-full max-h-[50vh] block"
+                            />
+                        </div>
+                        <p class="text-sm text-center text-slate-400">Ajusta los bordes del documento</p>
+                        <div class="flex gap-3 justify-end mt-2">
+                            <button
+                                class="btn btn-secondary text-sm px-6"
+                                onclick={cancelCrop}>Reintentar</button
+                            >
+                            <button
+                                class="btn btn-primary text-sm px-6 font-semibold"
+                                onclick={confirmCrop}
+                                >Confirmar Recorte</button
+                            >
                         </div>
                     </div>
                 {:else if !selectedFile}
