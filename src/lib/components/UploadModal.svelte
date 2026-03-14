@@ -416,7 +416,7 @@
             cropImageSrc = null;
         } catch (err: any) {
             console.error("Error cropping image:", err);
-            errorMsg = "Ups, hubo un error procesando el recorte: " + err.message;
+            errorMsg = "Ups, hubo un error procesando el recorte: " + (err?.message || err || "Error desconocido");
         }
     }
 
@@ -546,11 +546,11 @@
 
 {#if show}
     <div
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-950/80 backdrop-blur-sm transition-opacity"
+        class="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-950/80 backdrop-blur-sm transition-opacity overflow-y-auto"
         onclick={handleClose}
     >
         <div
-            class="bg-surface-bg border border-surface-glass-border w-full max-w-md rounded-2xl shadow-2xl shadow-brand-500/10 overflow-hidden flex flex-col"
+            class="bg-surface-bg border border-surface-glass-border w-full max-w-md rounded-2xl shadow-2xl shadow-brand-500/10 flex flex-col my-8 sm:my-auto"
             onclick={(e) => e.stopPropagation()}
         >
             <div
