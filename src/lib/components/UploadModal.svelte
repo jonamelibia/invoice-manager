@@ -40,7 +40,11 @@
         if (!cropperElement || !(window as any).cvReady || !cropImageSrc) return;
         try {
             const jscanifyMod = await import("jscanify");
-            const JscanifyClass = jscanifyMod.default || jscanifyMod;
+            // Production bundles can sometimes nest the default export multiple times or omit it
+            let JscanifyClass = (jscanifyMod as any).default;
+            if (JscanifyClass && JscanifyClass.default) JscanifyClass = JscanifyClass.default;
+            if (typeof JscanifyClass !== 'function') JscanifyClass = jscanifyMod as any;
+            
             const scanner = new JscanifyClass();
             
             // Ensure image is fully loaded in the DOM element
@@ -166,7 +170,10 @@
             await new Promise(r => imgEl.onload = r);
 
             const jscanifyMod = await import("jscanify");
-            const JscanifyClass = jscanifyMod.default || jscanifyMod;
+            let JscanifyClass = (jscanifyMod as any).default;
+            if (JscanifyClass && JscanifyClass.default) JscanifyClass = JscanifyClass.default;
+            if (typeof JscanifyClass !== 'function') JscanifyClass = jscanifyMod as any;
+            
             const scanner = new JscanifyClass();
             const w = imgEl.width;
             const h = imgEl.height;
