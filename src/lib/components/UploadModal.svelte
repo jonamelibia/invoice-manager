@@ -35,81 +35,86 @@
 
     function findPaperContour(cv: any, img: any) {
         let imgGray = new cv.Mat();
-        let imgBlur = new cv.Mat();
-        let imgThresh = new cv.Mat();
+        let imgSobel = new cv.Mat();
+        let imgGradX = new cv.Mat();
+        let imgGradY = new cv.Mat();
+        let imgAbsGradX = new cv.Mat();
+        let imgAbsGradY = new cv.Mat();
         let imgMorphed = new cv.Mat();
         
         try {
+            // 1. Grayscale + Fast Blur
             cv.cvtColor(img, imgGray, cv.COLOR_RGBA2GRAY);
-            cv.bilateralFilter(imgGray, imgBlur, 9, 75, 75, cv.BORDER_DEFAULT);
+            cv.GaussianBlur(imgGray, imgGray, new cv.Size(5, 5), 0);
             
+            // 2. Sobel Gradients (Excellent for detecting paper edges against tables)
+            cv.Sobel(imgGray, imgGradX, cv.CV_16S, 1, 0, 3);
+            cv.Sobel(imgGray, imgGradY, cv.CV_16S, 0, 1, 3);
+            cv.convertScaleAbs(imgGradX, imgAbsGradX);
+            cv.convertScaleAbs(imgGradY, imgAbsGradY);
+            cv.addWeighted(imgAbsGradX, 0.5, imgAbsGradY, 0.5, 0, imgSobel);
+            
+            // 3. Threshold + Morphological Closure
+            cv.threshold(imgSobel, imgMorphed, 50, 255, cv.THRESH_BINARY);
+            const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
+            cv.morphologyEx(imgMorphed, imgMorphed, cv.MORPH_CLOSE, kernel);
+            kernel.delete();
+
+            let contours = new cv.MatVector();
+            let hierarchy = new cv.Mat();
+            cv.findContours(imgMorphed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
             let maxArea = 0;
             let maxContour = null;
             const totalArea = img.cols * img.rows;
-            const minArea = totalArea * 0.1;
 
-            // Multi-Threshold Strategy: Try different adaptive levels to catch the paper
-            // This imitates AI "searching" for the best contrast
-            const thresholds = [11, 21, 31];
-            const constants = [2, 5];
+            for (let i = 0; i < contours.size(); ++i) {
+                const cnt = contours.get(i);
+                const area = cv.contourArea(cnt);
+                
+                // Heuristic: Document must be > 15% and < 95% of screen
+                if (area < totalArea * 0.15 || area > totalArea * 0.95) continue;
 
-            for (let t of thresholds) {
-                for (let c of constants) {
-                    cv.adaptiveThreshold(imgBlur, imgThresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, t, c);
-                    cv.bitwise_not(imgThresh, imgMorphed);
-                    
-                    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
-                    cv.morphologyEx(imgMorphed, imgMorphed, cv.MORPH_CLOSE, kernel);
-                    kernel.delete();
-
-                    let contours = new cv.MatVector();
-                    let hierarchy = new cv.Mat();
-                    cv.findContours(imgMorphed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-                    for (let i = 0; i < contours.size(); ++i) {
-                        const cnt = contours.get(i);
-                        const area = cv.contourArea(cnt);
-                        if (area < minArea || area < maxArea) continue;
-
-                        const peri = cv.arcLength(cnt, true);
-                        const approx = new cv.Mat();
-                        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-                        
-                        if (approx.rows === 4 && cv.isContourConvex(approx)) {
-                            maxArea = area;
-                            if (maxContour) maxContour.delete();
-                            maxContour = approx;
-                        } else {
-                            approx.delete();
-                        }
+                const peri = cv.arcLength(cnt, true);
+                const approx = new cv.Mat();
+                cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+                
+                // AI-like validation: check for 4 corners and logical aspect ratio
+                if (approx.rows === 4 && cv.isContourConvex(approx)) {
+                    if (area > maxArea) {
+                        maxArea = area;
+                        if (maxContour) maxContour.delete();
+                        maxContour = approx;
+                    } else {
+                        approx.delete();
                     }
-                    contours.delete(); hierarchy.delete();
-                    if (maxContour) break; 
+                } else {
+                    approx.delete();
                 }
-                if (maxContour) break;
             }
 
+            contours.delete(); hierarchy.delete();
             return maxContour;
         } catch (e) {
-            console.error("Critical error in document detection:", e);
             return null;
         } finally {
-            imgGray.delete(); imgBlur.delete(); imgThresh.delete(); imgMorphed.delete();
+            imgGray.delete(); imgSobel.delete(); imgGradX.delete(); imgGradY.delete();
+            imgAbsGradX.delete(); imgAbsGradY.delete(); imgMorphed.delete();
         }
     }
 
-    // Live Camera Detection Loop
-    function processCameraFrame() {
+    // High-performance Live Loop
+    async function processCameraFrame() {
         if (!showCamera || !videoElement || !cameraCanvas || !(window as any).cvReady) {
             animationFrameId = requestAnimationFrame(processCameraFrame);
             return;
         }
 
         const cv = (window as any).cv;
-        const ctx = cameraCanvas.getContext('2d');
+        const ctx = cameraCanvas.getContext('2d', { alpha: true });
         if (!ctx) return;
 
-        // Matching canvas size to video display size
+        // Visual Sync
         if (cameraCanvas.width !== videoElement.videoWidth) {
             cameraCanvas.width = videoElement.videoWidth;
             cameraCanvas.height = videoElement.videoHeight;
@@ -118,37 +123,50 @@
         ctx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
 
         try {
-            // Low-res grab for speed in live preview
-            let cap = new cv.VideoCapture(videoElement);
+            // Optimize: Downscale frame for detection to save CPU/Battery
+            const scale = 0.5; // Detect on half res
             let frame = new cv.Mat(videoElement.videoHeight, videoElement.videoWidth, cv.CV_8UC4);
+            let cap = new cv.VideoCapture(videoElement);
             cap.read(frame);
 
-            const maxContour = findPaperContour(cv, frame);
+            let lowResFrame = new cv.Mat();
+            cv.resize(frame, lowResFrame, new cv.Size(0, 0), scale, scale, cv.INTER_AREA);
+
+            const maxContour = findPaperContour(cv, lowResFrame);
             
             if (maxContour) {
                 const corners = getCornerPoints(cv, maxContour);
                 
-                // Draw detection box on live feed
+                // Upscale corners back to canvas/video size
+                const upscale = (p: {x:number, y:number}) => ({ x: p.x / scale, y: p.y / scale });
+                const tl = upscale(corners.tl);
+                const tr = upscale(corners.tr);
+                const br = upscale(corners.br);
+                const bl = upscale(corners.bl);
+
+                // Professional Scanner Animation
                 ctx.beginPath();
                 ctx.strokeStyle = '#0ea5e9';
-                ctx.lineWidth = 8;
+                ctx.lineWidth = 12;
+                ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
-                ctx.moveTo(corners.tl.x, corners.tl.y);
-                ctx.lineTo(corners.tr.x, corners.tr.y);
-                ctx.lineTo(corners.br.x, corners.br.y);
-                ctx.lineTo(corners.bl.x, corners.bl.y);
+                ctx.setLineDash([20, 15]); // "Scanning" effect
+                ctx.moveTo(tl.x, tl.y);
+                ctx.lineTo(tr.x, tr.y);
+                ctx.lineTo(br.x, br.y);
+                ctx.lineTo(bl.x, bl.y);
                 ctx.closePath();
                 ctx.stroke();
 
-                // Subtle fill
-                ctx.fillStyle = 'rgba(14, 165, 233, 0.2)';
+                ctx.fillStyle = 'rgba(14, 165, 233, 0.15)';
+                ctx.setLineDash([]); // Reset for fill
                 ctx.fill();
 
                 maxContour.delete();
             }
-            frame.delete();
+            frame.delete(); lowResFrame.delete();
         } catch (e) {
-            // Silent fail on frame errors to keep loop running
+            // Ignore frame errors
         }
 
         animationFrameId = requestAnimationFrame(processCameraFrame);
