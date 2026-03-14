@@ -33,29 +33,44 @@
 
     function findPaperContour(cv: any, img: any) {
         const imgGray = new cv.Mat();
-        cv.Canny(img, imgGray, 50, 200);
         const imgBlur = new cv.Mat();
-        cv.GaussianBlur(imgGray, imgBlur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
         const imgThresh = new cv.Mat();
-        cv.threshold(imgBlur, imgThresh, 0, 255, cv.THRESH_OTSU);
-
+        
+        // 1. Bilateral filter preserves edges while reducing noise (better than Gaussian for docs)
+        cv.cvtColor(img, imgGray, cv.COLOR_RGBA2GRAY);
+        cv.bilateralFilter(imgGray, imgBlur, 9, 75, 75, cv.BORDER_DEFAULT);
+        
+        // 2. Canny edge detection
+        cv.Canny(imgBlur, imgThresh, 75, 200);
+        
+        // 3. Morphological operations to close gaps in edges
+        const M = cv.Mat.ones(5, 5, cv.CV_8U);
+        cv.dilate(imgThresh, imgThresh, M);
+        
         let contours = new cv.MatVector();
         let hierarchy = new cv.Mat();
-        cv.findContours(imgThresh, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
+        cv.findContours(imgThresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
         let maxArea = 0;
         let maxContourIndex = -1;
         for (let i = 0; i < contours.size(); ++i) {
-            let contourArea = cv.contourArea(contours.get(i));
-            if (contourArea > maxArea) {
-                maxArea = contourArea;
+            let contour = contours.get(i);
+            let area = cv.contourArea(contour);
+            // We want large contours that look like quadrilaterals
+            let peri = cv.arcLength(contour, true);
+            let approx = new cv.Mat();
+            cv.approxPolyDP(contour, approx, 0.02 * peri, true);
+            
+            if (area > maxArea && approx.rows === 4) {
+                maxArea = area;
                 maxContourIndex = i;
             }
+            approx.delete();
         }
 
         const maxContour = maxContourIndex >= 0 ? contours.get(maxContourIndex).clone() : null;
 
-        imgGray.delete(); imgBlur.delete(); imgThresh.delete(); contours.delete(); hierarchy.delete();
+        imgGray.delete(); imgBlur.delete(); imgThresh.delete(); contours.delete(); hierarchy.delete(); M.delete();
         return maxContour;
     }
 
@@ -103,6 +118,11 @@
 
         let M = cv.getPerspectiveTransform(srcTri, dstTri);
         cv.warpPerspective(img, warpedDst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+        
+        // Quality Enhancement: Increase contrast and brightness for document readability
+        // alpha (contrast 1.0-3.0), beta (brightness 0-100)
+        cv.convertScaleAbs(warpedDst, warpedDst, 1.25, 10);
+        
         cv.imshow(canvas, warpedDst);
 
         img.delete(); warpedDst.delete(); M.delete(); srcTri.delete(); dstTri.delete();
@@ -181,7 +201,11 @@
         showCamera = true;
         try {
             mediaStream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment" },
+                video: { 
+                    facingMode: "environment",
+                    width: { ideal: 4096 }, // Maximize resolution
+                    height: { ideal: 2160 }
+                },
                 audio: false,
             });
         } catch (e: any) {
@@ -263,7 +287,8 @@
             
             if (!resultCanvas) throw new Error("Fallo al recortar, intenta de nuevo ajustando los puntos.");
 
-            const imgData = resultCanvas.toDataURL("image/jpeg", 0.9);
+            // Higher quality JPEG and larger scale for PDF
+            const imgData = resultCanvas.toDataURL("image/jpeg", 0.95);
 
             const { jsPDF } = await import("jspdf");
 
@@ -272,6 +297,7 @@
                 orientation: orientation,
                 unit: "px",
                 format: [resultWidth, resultHeight],
+                compress: true
             });
 
             pdf.addImage(imgData, "JPEG", 0, 0, resultWidth, resultHeight);
