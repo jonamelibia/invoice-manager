@@ -35,65 +35,87 @@
         const imgGray = new cv.Mat();
         const imgBlur = new cv.Mat();
         const imgThresh = new cv.Mat();
+        const imgMorphed = new cv.Mat();
         
-        // 1. Bilateral filter preserves edges while reducing noise (better than Gaussian for docs)
+        // 1. Pre-process: Grayscale and aggressive Bilateral Filter to wipe noise while keeping sharp edges
         cv.cvtColor(img, imgGray, cv.COLOR_RGBA2GRAY);
-        cv.bilateralFilter(imgGray, imgBlur, 9, 75, 75, cv.BORDER_DEFAULT);
+        cv.bilateralFilter(imgGray, imgBlur, 11, 85, 85, cv.BORDER_DEFAULT);
         
-        // 2. Canny edge detection
-        cv.Canny(imgBlur, imgThresh, 75, 200);
+        // 2. Edge Detection with higher sensitivity
+        cv.Canny(imgBlur, imgThresh, 50, 150);
         
-        // 3. Morphological operations to close gaps in edges
-        const M = cv.Mat.ones(5, 5, cv.CV_8U);
-        cv.dilate(imgThresh, imgThresh, M);
+        // 3. Morphological Closing to connect broken paper edges
+        const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+        cv.morphologyEx(imgThresh, imgMorphed, cv.MORPH_CLOSE, kernel);
         
         let contours = new cv.MatVector();
         let hierarchy = new cv.Mat();
-        cv.findContours(imgThresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        cv.findContours(imgMorphed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
         let maxArea = 0;
-        let maxContourIndex = -1;
+        let maxContour = null;
+
+        // Threshold for minimum paper size (10% of image)
+        const minArea = (img.cols * img.rows) * 0.1;
+
         for (let i = 0; i < contours.size(); ++i) {
             let contour = contours.get(i);
             let area = cv.contourArea(contour);
-            // We want large contours that look like quadrilaterals
-            let peri = cv.arcLength(contour, true);
-            let approx = new cv.Mat();
-            cv.approxPolyDP(contour, approx, 0.02 * peri, true);
             
-            if (area > maxArea && approx.rows === 4) {
-                maxArea = area;
-                maxContourIndex = i;
+            if (area > minArea && area > maxArea) {
+                let peri = cv.arcLength(contour, true);
+                let approx = new cv.Mat();
+                // Try to find a 4-point approximation (the paper)
+                cv.approxPolyDP(contour, approx, 0.02 * peri, true);
+                
+                if (approx.rows === 4) {
+                    maxArea = area;
+                    if (maxContour) maxContour.delete();
+                    maxContour = approx;
+                } else {
+                    approx.delete();
+                    // Fallback to the largest contour even if not strictly 4 points (we will force 4 corners later)
+                    if (!maxContour) {
+                        maxArea = area;
+                        maxContour = contour.clone();
+                    }
+                }
             }
-            approx.delete();
         }
 
-        const maxContour = maxContourIndex >= 0 ? contours.get(maxContourIndex).clone() : null;
-
-        imgGray.delete(); imgBlur.delete(); imgThresh.delete(); contours.delete(); hierarchy.delete(); M.delete();
+        imgGray.delete(); imgBlur.delete(); imgThresh.delete(); imgMorphed.delete(); 
+        contours.delete(); hierarchy.delete(); kernel.delete();
         return maxContour;
     }
 
     function getCornerPoints(cv: any, contour: any) {
-        let rect = cv.minAreaRect(contour);
-        const center = rect.center;
-        let corners: any = { tl: null, tr: null, bl: null, br: null };
-        let dists: any = { tl: 0, tr: 0, bl: 0, br: 0 };
-
-        for (let i = 0; i < contour.data32S.length; i += 2) {
-            const point = { x: contour.data32S[i], y: contour.data32S[i + 1] };
-            const dist = getDistance(point, center);
-            if (point.x < center.x && point.y < center.y) {
-                if (dist > dists.tl) { corners.tl = point; dists.tl = dist; }
-            } else if (point.x > center.x && point.y < center.y) {
-                if (dist > dists.tr) { corners.tr = point; dists.tr = dist; }
-            } else if (point.x < center.x && point.y > center.y) {
-                if (dist > dists.bl) { corners.bl = point; dists.bl = dist; }
-            } else if (point.x > center.x && point.y > center.y) {
-                if (dist > dists.br) { corners.br = point; dists.br = dist; }
+        // If it's already a 4-point approximation, use those points
+        let points = [];
+        if (contour.rows === 4) {
+            for (let i = 0; i < 4; i++) {
+                points.push({ x: contour.data32S[i * 2], y: contour.data32S[i * 2 + 1] });
+            }
+        } else {
+            // Otherwise, get the bounding box corners as a smart fallback
+            let rect = cv.minAreaRect(contour);
+            let vertices = cv.rotatedRectPoints(rect);
+            for (let i = 0; i < 4; i++) {
+                points.push({ x: vertices[i].x, y: vertices[i].y });
             }
         }
-        return corners;
+
+        // Sort points: top-left, top-right, bottom-right, bottom-left
+        // Calculation: sum(x+y) for tl/br, diff(y-x) for tr/bl
+        points.sort((a, b) => (a.x + a.y) - (b.x + b.y));
+        const tl = points[0];
+        const br = points[3];
+        
+        const remaining = [points[1], points[2]];
+        remaining.sort((a, b) => (a.y - a.x) - (b.y - b.x));
+        const tr = remaining[0];
+        const bl = remaining[1];
+
+        return { tl, tr, bl, br };
     }
 
     function extractPaper(cv: any, image: HTMLImageElement, resultWidth: number, resultHeight: number, cornerPoints: any) {
