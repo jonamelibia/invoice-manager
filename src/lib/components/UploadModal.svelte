@@ -1,7 +1,6 @@
 <script lang="ts">
     import { createEventDispatcher } from "svelte";
     import { jsPDF } from "jspdf";
-    import jscanify from "jscanify";
 
     let { show = false, targetFolderId, onClose, onUploadSuccess } = $props();
 
@@ -39,10 +38,12 @@
         }
     });
 
-    function initScannerOverlay() {
+    async function initScannerOverlay() {
         if (!cropperElement || !(window as any).cvReady) return;
         try {
-            const scanner = new jscanify();
+            const jscanifyMod = await import("jscanify");
+            const JscanifyClass = jscanifyMod.default || jscanifyMod;
+            const scanner = new JscanifyClass();
             const img = (window as any).cv.imread(cropperElement);
             const maxContour = scanner.findPaperContour(img);
             if (maxContour) {
@@ -145,7 +146,9 @@
             imgEl.src = cropImageSrc!;
             await new Promise(r => imgEl.onload = r);
 
-            const scanner = new jscanify();
+            const jscanifyMod = await import("jscanify");
+            const JscanifyClass = jscanifyMod.default || jscanifyMod;
+            const scanner = new JscanifyClass();
             const w = imgEl.width;
             const h = imgEl.height;
 
