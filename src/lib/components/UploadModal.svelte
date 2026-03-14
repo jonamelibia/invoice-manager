@@ -12,7 +12,9 @@
     // Camera variables
     let showCamera = $state(false);
     let videoElement = $state<HTMLVideoElement | null>(null);
+    let cameraCanvas = $state<HTMLCanvasElement | null>(null);
     let mediaStream = $state<MediaStream | null>(null);
+    let animationFrameId: number | null = null;
 
     // Scanner / Perspective Cropper variables
     let showCropper = $state(false);
@@ -32,72 +34,124 @@
     }
 
     function findPaperContour(cv: any, img: any) {
-        const imgGray = new cv.Mat();
-        const imgEqualized = new cv.Mat();
-        const imgBlur = new cv.Mat();
-        const imgThresh = new cv.Mat();
-        const imgMorphed = new cv.Mat();
+        let imgGray = new cv.Mat();
+        let imgBlur = new cv.Mat();
+        let imgThresh = new cv.Mat();
+        let imgMorphed = new cv.Mat();
         
         try {
-            // 1. Convert to gray and apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-            // This is "AI-like" behavior for handling different lighting/shadows
             cv.cvtColor(img, imgGray, cv.COLOR_RGBA2GRAY);
-            const clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
-            clahe.apply(imgGray, imgEqualized);
-            clahe.delete();
+            cv.bilateralFilter(imgGray, imgBlur, 9, 75, 75, cv.BORDER_DEFAULT);
             
-            // 2. Strong Bilateral Filter to wipe noise
-            cv.bilateralFilter(imgEqualized, imgBlur, 9, 75, 75, cv.BORDER_DEFAULT);
-            
-            // 3. Multi-threshold approach: Adaptive thresholding is best for paper
-            cv.adaptiveThreshold(imgBlur, imgThresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2);
-            
-            // 4. Fill gaps and smooth edges
-            const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
-            cv.morphologyEx(imgThresh, imgMorphed, cv.MORPH_CLOSE, kernel);
-            cv.bitwise_not(imgMorphed, imgMorphed);
-            
-            let contours = new cv.MatVector();
-            let hierarchy = new cv.Mat();
-            cv.findContours(imgMorphed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
             let maxArea = 0;
             let maxContour = null;
             const totalArea = img.cols * img.rows;
+            const minArea = totalArea * 0.1;
 
-            for (let i = 0; i < contours.size(); ++i) {
-                const cnt = contours.get(i);
-                const area = cv.contourArea(cnt);
-                
-                // Ignore small noise (less than 10% of image)
-                if (area < totalArea * 0.1) continue;
+            // Multi-Threshold Strategy: Try different adaptive levels to catch the paper
+            // This imitates AI "searching" for the best contrast
+            const thresholds = [11, 21, 31];
+            const constants = [2, 5];
 
-                const peri = cv.arcLength(cnt, true);
-                const approx = new cv.Mat();
-                cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-                
-                // We want specifically 4 corners, but also checking for "boxiness"
-                if (approx.rows === 4 && cv.isContourConvex(approx)) {
-                    if (area > maxArea) {
-                        maxArea = area;
-                        if (maxContour) maxContour.delete();
-                        maxContour = approx;
-                    } else {
-                        approx.delete();
+            for (let t of thresholds) {
+                for (let c of constants) {
+                    cv.adaptiveThreshold(imgBlur, imgThresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, t, c);
+                    cv.bitwise_not(imgThresh, imgMorphed);
+                    
+                    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+                    cv.morphologyEx(imgMorphed, imgMorphed, cv.MORPH_CLOSE, kernel);
+                    kernel.delete();
+
+                    let contours = new cv.MatVector();
+                    let hierarchy = new cv.Mat();
+                    cv.findContours(imgMorphed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+                    for (let i = 0; i < contours.size(); ++i) {
+                        const cnt = contours.get(i);
+                        const area = cv.contourArea(cnt);
+                        if (area < minArea || area < maxArea) continue;
+
+                        const peri = cv.arcLength(cnt, true);
+                        const approx = new cv.Mat();
+                        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+                        
+                        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+                            maxArea = area;
+                            if (maxContour) maxContour.delete();
+                            maxContour = approx;
+                        } else {
+                            approx.delete();
+                        }
                     }
-                } else {
-                    approx.delete();
+                    contours.delete(); hierarchy.delete();
+                    if (maxContour) break; 
                 }
+                if (maxContour) break;
             }
 
-            contours.delete(); hierarchy.delete(); kernel.delete();
             return maxContour;
         } catch (e) {
             console.error("Critical error in document detection:", e);
             return null;
         } finally {
-            imgGray.delete(); imgEqualized.delete(); imgBlur.delete(); imgThresh.delete(); imgMorphed.delete();
+            imgGray.delete(); imgBlur.delete(); imgThresh.delete(); imgMorphed.delete();
         }
+    }
+
+    // Live Camera Detection Loop
+    function processCameraFrame() {
+        if (!showCamera || !videoElement || !cameraCanvas || !(window as any).cvReady) {
+            animationFrameId = requestAnimationFrame(processCameraFrame);
+            return;
+        }
+
+        const cv = (window as any).cv;
+        const ctx = cameraCanvas.getContext('2d');
+        if (!ctx) return;
+
+        // Matching canvas size to video display size
+        if (cameraCanvas.width !== videoElement.videoWidth) {
+            cameraCanvas.width = videoElement.videoWidth;
+            cameraCanvas.height = videoElement.videoHeight;
+        }
+
+        ctx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
+
+        try {
+            // Low-res grab for speed in live preview
+            let cap = new cv.VideoCapture(videoElement);
+            let frame = new cv.Mat(videoElement.videoHeight, videoElement.videoWidth, cv.CV_8UC4);
+            cap.read(frame);
+
+            const maxContour = findPaperContour(cv, frame);
+            
+            if (maxContour) {
+                const corners = getCornerPoints(cv, maxContour);
+                
+                // Draw detection box on live feed
+                ctx.beginPath();
+                ctx.strokeStyle = '#0ea5e9';
+                ctx.lineWidth = 8;
+                ctx.lineJoin = 'round';
+                ctx.moveTo(corners.tl.x, corners.tl.y);
+                ctx.lineTo(corners.tr.x, corners.tr.y);
+                ctx.lineTo(corners.br.x, corners.br.y);
+                ctx.lineTo(corners.bl.x, corners.bl.y);
+                ctx.closePath();
+                ctx.stroke();
+
+                // Subtle fill
+                ctx.fillStyle = 'rgba(14, 165, 233, 0.2)';
+                ctx.fill();
+
+                maxContour.delete();
+            }
+            frame.delete();
+        } catch (e) {
+            // Silent fail on frame errors to keep loop running
+        }
+
+        animationFrameId = requestAnimationFrame(processCameraFrame);
     }
 
     function getCornerPoints(cv: any, contour: any) {
@@ -236,6 +290,8 @@
                 },
                 audio: false,
             });
+            // Start the real-time detection loop
+            animationFrameId = requestAnimationFrame(processCameraFrame);
         } catch (e: any) {
             errorMsg =
                 "Error al iniciar la cámara: comprueba los permisos. (" +
@@ -246,6 +302,10 @@
     }
 
     function stopCamera() {
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+        }
         if (mediaStream) {
             mediaStream.getTracks().forEach((track) => track.stop());
             mediaStream = null;
@@ -536,6 +596,24 @@
                             playsinline
                             class="w-full h-full object-cover"
                         ></video>
+
+                        <!-- Live Detection Overlay Canvas -->
+                        <canvas
+                            bind:this={cameraCanvas}
+                            class="absolute inset-0 w-full h-full pointer-events-none"
+                        ></canvas>
+
+                        <!-- Live Hint -->
+                        <div class="absolute inset-x-0 top-0 p-4 bg-gradient-to-b from-black/60 to-transparent flex flex-col items-center">
+                            <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-500/20 border border-brand-500/30 backdrop-blur-md">
+                                <span class="w-1.5 h-1.5 rounded-full bg-brand-500 animate-pulse"></span>
+                                <span class="text-[10px] sm:text-xs font-bold text-brand-400 uppercase tracking-widest">Escaneando con IA</span>
+                            </span>
+                            <p class="text-white text-xs mt-3 font-medium text-center opacity-80">
+                                Encuadra el documento hasta ver el recuadro azul
+                            </p>
+                        </div>
+
                         <div
                             class="absolute bottom-6 left-0 right-0 flex items-center justify-center gap-8"
                         >
