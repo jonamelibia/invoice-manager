@@ -26,6 +26,89 @@
     let ptBottomRight = $state({x: 0.9, y: 0.9});
     let activePoint = $state<'tl'|'tr'|'bl'|'br'|null>(null);
 
+    // Scanner logic reimplemented locally to avoid jscanify bundling issues
+    function getDistance(p1: {x:number, y:number}, p2: {x:number, y:number}) {
+        return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    }
+
+    function findPaperContour(cv: any, img: any) {
+        const imgGray = new cv.Mat();
+        cv.Canny(img, imgGray, 50, 200);
+        const imgBlur = new cv.Mat();
+        cv.GaussianBlur(imgGray, imgBlur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+        const imgThresh = new cv.Mat();
+        cv.threshold(imgBlur, imgThresh, 0, 255, cv.THRESH_OTSU);
+
+        let contours = new cv.MatVector();
+        let hierarchy = new cv.Mat();
+        cv.findContours(imgThresh, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
+
+        let maxArea = 0;
+        let maxContourIndex = -1;
+        for (let i = 0; i < contours.size(); ++i) {
+            let contourArea = cv.contourArea(contours.get(i));
+            if (contourArea > maxArea) {
+                maxArea = contourArea;
+                maxContourIndex = i;
+            }
+        }
+
+        const maxContour = maxContourIndex >= 0 ? contours.get(maxContourIndex).clone() : null;
+
+        imgGray.delete(); imgBlur.delete(); imgThresh.delete(); contours.delete(); hierarchy.delete();
+        return maxContour;
+    }
+
+    function getCornerPoints(cv: any, contour: any) {
+        let rect = cv.minAreaRect(contour);
+        const center = rect.center;
+        let corners: any = { tl: null, tr: null, bl: null, br: null };
+        let dists: any = { tl: 0, tr: 0, bl: 0, br: 0 };
+
+        for (let i = 0; i < contour.data32S.length; i += 2) {
+            const point = { x: contour.data32S[i], y: contour.data32S[i + 1] };
+            const dist = getDistance(point, center);
+            if (point.x < center.x && point.y < center.y) {
+                if (dist > dists.tl) { corners.tl = point; dists.tl = dist; }
+            } else if (point.x > center.x && point.y < center.y) {
+                if (dist > dists.tr) { corners.tr = point; dists.tr = dist; }
+            } else if (point.x < center.x && point.y > center.y) {
+                if (dist > dists.bl) { corners.bl = point; dists.bl = dist; }
+            } else if (point.x > center.x && point.y > center.y) {
+                if (dist > dists.br) { corners.br = point; dists.br = dist; }
+            }
+        }
+        return corners;
+    }
+
+    function extractPaper(cv: any, image: HTMLImageElement, resultWidth: number, resultHeight: number, cornerPoints: any) {
+        const canvas = document.createElement("canvas");
+        const img = cv.imread(image);
+        let warpedDst = new cv.Mat();
+        let dsize = new cv.Size(resultWidth, resultHeight);
+        
+        let srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+            cornerPoints.tl.x, cornerPoints.tl.y,
+            cornerPoints.tr.x, cornerPoints.tr.y,
+            cornerPoints.bl.x, cornerPoints.bl.y,
+            cornerPoints.br.x, cornerPoints.br.y,
+        ]);
+
+        let dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+            0, 0,
+            resultWidth, 0,
+            0, resultHeight,
+            resultWidth, resultHeight,
+        ]);
+
+        let M = cv.getPerspectiveTransform(srcTri, dstTri);
+        cv.warpPerspective(img, warpedDst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+        cv.imshow(canvas, warpedDst);
+
+        img.delete(); warpedDst.delete(); M.delete(); srcTri.delete(); dstTri.delete();
+        return canvas;
+    }
+
     $effect(() => {
         if (
             videoElement &&
@@ -39,36 +122,25 @@
     async function initScannerOverlay() {
         if (!cropperElement || !(window as any).cvReady || !cropImageSrc) return;
         try {
-            const jscanifyMod = await import("jscanify");
-            // Production bundles can sometimes nest the default export multiple times or omit it
-            let JscanifyClass = (jscanifyMod as any).default;
-            if (JscanifyClass && JscanifyClass.default) JscanifyClass = JscanifyClass.default;
-            if (typeof JscanifyClass !== 'function') JscanifyClass = jscanifyMod as any;
-            
-            const scanner = new JscanifyClass();
-            
-            // Ensure image is fully loaded in the DOM element
+            // Ensure image is fully loaded
             if (!cropperElement.complete || cropperElement.naturalWidth === 0) {
-                // Wait a bit if not ready, though onload should handle this
                 setTimeout(initScannerOverlay, 100);
                 return;
             }
 
             const cv = (window as any).cv;
             const img = cv.imread(cropperElement);
-            const maxContour = scanner.findPaperContour(img);
+            const maxContour = findPaperContour(cv, img);
             
             if (maxContour) {
-                const corners = scanner.getCornerPoints(maxContour);
-                if (corners && 
-                    corners.topLeftCorner && corners.topRightCorner && 
-                    corners.bottomLeftCorner && corners.bottomRightCorner) {
-                    
-                    ptTopLeft = { x: corners.topLeftCorner.x / img.cols, y: corners.topLeftCorner.y / img.rows };
-                    ptTopRight = { x: corners.topRightCorner.x / img.cols, y: corners.topRightCorner.y / img.rows };
-                    ptBottomLeft = { x: corners.bottomLeftCorner.x / img.cols, y: corners.bottomLeftCorner.y / img.rows };
-                    ptBottomRight = { x: corners.bottomRightCorner.x / img.cols, y: corners.bottomRightCorner.y / img.rows };
+                const corners = getCornerPoints(cv, maxContour);
+                if (corners.tl && corners.tr && corners.bl && corners.br) {
+                    ptTopLeft = { x: corners.tl.x / img.cols, y: corners.tl.y / img.rows };
+                    ptTopRight = { x: corners.tr.x / img.cols, y: corners.tr.y / img.rows };
+                    ptBottomLeft = { x: corners.bl.x / img.cols, y: corners.bl.y / img.rows };
+                    ptBottomRight = { x: corners.br.x / img.cols, y: corners.br.y / img.rows };
                 }
+                maxContour.delete();
             }
             img.delete();
         } catch (e) {
@@ -169,32 +241,25 @@
             imgEl.src = cropImageSrc!;
             await new Promise(r => imgEl.onload = r);
 
-            const jscanifyMod = await import("jscanify");
-            let JscanifyClass = (jscanifyMod as any).default;
-            if (JscanifyClass && JscanifyClass.default) JscanifyClass = JscanifyClass.default;
-            if (typeof JscanifyClass !== 'function') JscanifyClass = jscanifyMod as any;
-            
-            const scanner = new JscanifyClass();
             const w = imgEl.width;
             const h = imgEl.height;
 
-            const customCorners = {
-                topLeftCorner: { x: ptTopLeft.x * w, y: ptTopLeft.y * h },
-                topRightCorner: { x: ptTopRight.x * w, y: ptTopRight.y * h },
-                bottomLeftCorner: { x: ptBottomLeft.x * w, y: ptBottomLeft.y * h },
-                bottomRightCorner: { x: ptBottomRight.x * w, y: ptBottomRight.y * h },
+            const JscanCorners = {
+                tl: { x: ptTopLeft.x * w, y: ptTopLeft.y * h },
+                tr: { x: ptTopRight.x * w, y: ptTopRight.y * h },
+                bl: { x: ptBottomLeft.x * w, y: ptBottomLeft.y * h },
+                br: { x: ptBottomRight.x * w, y: ptBottomRight.y * h },
             };
 
-            const dt = (p1x: number, p1y: number, p2x: number, p2y: number) => Math.hypot(p1x-p2x, p1y-p2y);
-            const w1 = dt(customCorners.topLeftCorner.x, customCorners.topLeftCorner.y, customCorners.topRightCorner.x, customCorners.topRightCorner.y);
-            const w2 = dt(customCorners.bottomLeftCorner.x, customCorners.bottomLeftCorner.y, customCorners.bottomRightCorner.x, customCorners.bottomRightCorner.y);
+            const w1 = getDistance(JscanCorners.tl, JscanCorners.tr);
+            const w2 = getDistance(JscanCorners.bl, JscanCorners.br);
             const resultWidth = Math.max(w1, w2);
 
-            const h1 = dt(customCorners.topLeftCorner.x, customCorners.topLeftCorner.y, customCorners.bottomLeftCorner.x, customCorners.bottomLeftCorner.y);
-            const h2 = dt(customCorners.topRightCorner.x, customCorners.topRightCorner.y, customCorners.bottomRightCorner.x, customCorners.bottomRightCorner.y);
+            const h1 = getDistance(JscanCorners.tl, JscanCorners.bl);
+            const h2 = getDistance(JscanCorners.tr, JscanCorners.br);
             const resultHeight = Math.max(h1, h2);
 
-            const resultCanvas = scanner.extractPaper(imgEl, resultWidth, resultHeight, customCorners);
+            const resultCanvas = extractPaper(cv, imgEl, resultWidth, resultHeight, JscanCorners);
             
             if (!resultCanvas) throw new Error("Fallo al recortar, intenta de nuevo ajustando los puntos.");
 
@@ -471,14 +536,15 @@
                                 <!-- Polygon connecting points -->
                                 <svg 
                                     class="absolute inset-0 w-full h-full pointer-events-none" 
+                                    viewBox="0 0 100 100"
                                     preserveAspectRatio="none"
                                     aria-hidden="true"
                                 >
                                     <polygon 
-                                        points="{ptTopLeft.x*100}%,{ptTopLeft.y*100}% {ptTopRight.x*100}%,{ptTopRight.y*100}% {ptBottomRight.x*100}%,{ptBottomRight.y*100}% {ptBottomLeft.x*100}%,{ptBottomLeft.y*100}%"
+                                        points="{ptTopLeft.x*100},{ptTopLeft.y*100} {ptTopRight.x*100},{ptTopRight.y*100} {ptBottomRight.x*100},{ptBottomRight.y*100} {ptBottomLeft.x*100},{ptBottomLeft.y*100}"
                                         fill="rgba(14, 165, 233, 0.2)"
                                         stroke="#0ea5e9"
-                                        stroke-width="2"
+                                        stroke-width="1"
                                     />
                                 </svg>
                                 
