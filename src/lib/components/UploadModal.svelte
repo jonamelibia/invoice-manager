@@ -1,7 +1,5 @@
 <script lang="ts">
     import { createEventDispatcher } from "svelte";
-    import { jsPDF } from "jspdf";
-
     let { show = false, targetFolderId, onClose, onUploadSuccess } = $props();
 
     let isDragging = $state(false);
@@ -173,6 +171,8 @@
             if (!resultCanvas) throw new Error("Fallo al recortar, intenta de nuevo ajustando los puntos.");
 
             const imgData = resultCanvas.toDataURL("image/jpeg", 0.9);
+
+            const { jsPDF } = await import("jspdf");
 
             const orientation = resultWidth > resultHeight ? "landscape" : "portrait";
             const pdf = new jsPDF({
