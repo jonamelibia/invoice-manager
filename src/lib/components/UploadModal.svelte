@@ -37,27 +37,47 @@
     });
 
     async function initScannerOverlay() {
-        if (!cropperElement || !(window as any).cvReady) return;
+        if (!cropperElement || !(window as any).cvReady || !cropImageSrc) return;
         try {
             const jscanifyMod = await import("jscanify");
             const JscanifyClass = jscanifyMod.default || jscanifyMod;
             const scanner = new JscanifyClass();
-            const img = (window as any).cv.imread(cropperElement);
+            
+            // Ensure image is fully loaded in the DOM element
+            if (!cropperElement.complete || cropperElement.naturalWidth === 0) {
+                // Wait a bit if not ready, though onload should handle this
+                setTimeout(initScannerOverlay, 100);
+                return;
+            }
+
+            const cv = (window as any).cv;
+            const img = cv.imread(cropperElement);
             const maxContour = scanner.findPaperContour(img);
+            
             if (maxContour) {
                 const corners = scanner.getCornerPoints(maxContour);
-                if (corners && corners.topLeftCorner) {
-                     ptTopLeft = { x: corners.topLeftCorner.x / img.cols, y: corners.topLeftCorner.y / img.rows };
-                     ptTopRight = { x: corners.topRightCorner.x / img.cols, y: corners.topRightCorner.y / img.rows };
-                     ptBottomLeft = { x: corners.bottomLeftCorner.x / img.cols, y: corners.bottomLeftCorner.y / img.rows };
-                     ptBottomRight = { x: corners.bottomRightCorner.x / img.cols, y: corners.bottomRightCorner.y / img.rows };
+                if (corners && 
+                    corners.topLeftCorner && corners.topRightCorner && 
+                    corners.bottomLeftCorner && corners.bottomRightCorner) {
+                    
+                    ptTopLeft = { x: corners.topLeftCorner.x / img.cols, y: corners.topLeftCorner.y / img.rows };
+                    ptTopRight = { x: corners.topRightCorner.x / img.cols, y: corners.topRightCorner.y / img.rows };
+                    ptBottomLeft = { x: corners.bottomLeftCorner.x / img.cols, y: corners.bottomLeftCorner.y / img.rows };
+                    ptBottomRight = { x: corners.bottomRightCorner.x / img.cols, y: corners.bottomRightCorner.y / img.rows };
                 }
             }
             img.delete();
         } catch (e) {
-            console.error("No se pudo autodetectar el borde:", e);
+            console.error("Error en autodetectección:", e);
         }
     }
+
+    // Effect to monitor OpenCV ready state and image availability
+    $effect(() => {
+        if (showCropper && (window as any).cvReady && cropperElement) {
+            initScannerOverlay();
+        }
+    });
 
     // Pointer events for dragging
     function handlePointerMove(e: PointerEvent) {
@@ -134,10 +154,11 @@
     }
 
     async function confirmCrop() {
-        if (!cropperElement) return;
+        if (!cropperElement || !cropImageSrc) return;
         
         try {
-            if (!(window as any).cvReady) {
+            const cv = (window as any).cv;
+            if (!cv || !(window as any).cvReady) {
                 throw new Error("El motor de escaneo (OpenCV) aún no ha cargado. Por favor espera unos segundos.");
             }
             const imgEl = new Image();
@@ -441,7 +462,11 @@
                                 />
                                 
                                 <!-- Polygon connecting points -->
-                                <svg class="absolute inset-0 w-full h-full pointer-events-none" preserveAspectRatio="none">
+                                <svg 
+                                    class="absolute inset-0 w-full h-full pointer-events-none" 
+                                    preserveAspectRatio="none"
+                                    aria-hidden="true"
+                                >
                                     <polygon 
                                         points="{ptTopLeft.x*100}%,{ptTopLeft.y*100}% {ptTopRight.x*100}%,{ptTopRight.y*100}% {ptBottomRight.x*100}%,{ptBottomRight.y*100}% {ptBottomLeft.x*100}%,{ptBottomLeft.y*100}%"
                                         fill="rgba(14, 165, 233, 0.2)"
@@ -451,19 +476,58 @@
                                 </svg>
                                 
                                 <!-- Drag handles -->
-                                <div class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" style="left: {ptTopLeft.x*100}%; top: {ptTopLeft.y*100}%" onpointerdown={(e) => { e.preventDefault(); activePoint = 'tl'; }}></div>
-                                <div class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" style="left: {ptTopRight.x*100}%; top: {ptTopRight.y*100}%" onpointerdown={(e) => { e.preventDefault(); activePoint = 'tr'; }}></div>
-                                <div class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" style="left: {ptBottomLeft.x*100}%; top: {ptBottomLeft.y*100}%" onpointerdown={(e) => { e.preventDefault(); activePoint = 'bl'; }}></div>
-                                <div class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" style="left: {ptBottomRight.x*100}%; top: {ptBottomRight.y*100}%" onpointerdown={(e) => { e.preventDefault(); activePoint = 'br'; }}></div>
+                                <button 
+                                    type="button"
+                                    class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" 
+                                    style="left: {ptTopLeft.x*100}%; top: {ptTopLeft.y*100}%" 
+                                    onpointerdown={(e) => { e.preventDefault(); activePoint = 'tl'; }}
+                                    aria-label="Ajustar esquina superior izquierda"
+                                ></button>
+                                <button 
+                                    type="button"
+                                    class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" 
+                                    style="left: {ptTopRight.x*100}%; top: {ptTopRight.y*100}%" 
+                                    onpointerdown={(e) => { e.preventDefault(); activePoint = 'tr'; }}
+                                    aria-label="Ajustar esquina superior derecha"
+                                ></button>
+                                <button 
+                                    type="button"
+                                    class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" 
+                                    style="left: {ptBottomLeft.x*100}%; top: {ptBottomLeft.y*100}%" 
+                                    onpointerdown={(e) => { e.preventDefault(); activePoint = 'bl'; }}
+                                    aria-label="Ajustar esquina inferior izquierda"
+                                ></button>
+                                <button 
+                                    type="button"
+                                    class="absolute w-8 h-8 -ml-4 -mt-4 bg-brand-500/80 border-2 border-white rounded-full cursor-move z-10 shadow-lg touch-none" 
+                                    style="left: {ptBottomRight.x*100}%; top: {ptBottomRight.y*100}%" 
+                                    onpointerdown={(e) => { e.preventDefault(); activePoint = 'br'; }}
+                                    aria-label="Ajustar esquina inferior derecha"
+                                ></button>
                             </div>
                         </div>
-                        <p class="text-sm text-center text-slate-400">Ajusta los 4 bordes del documento</p>
+                        <div class="flex items-center justify-between gap-4">
+                            <p class="text-sm text-slate-400">Ajusta los 4 bordes del documento</p>
+                            <button 
+                                type="button"
+                                class="text-brand-400 hover:text-brand-300 text-xs font-medium flex items-center gap-1"
+                                onclick={initScannerOverlay}
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                </svg>
+                                Redetectar bordes
+                            </button>
+                        </div>
                         <div class="flex gap-3 justify-end mt-2">
                             <button
+                                type="button"
                                 class="btn btn-secondary text-sm px-6"
                                 onclick={cancelCrop}>Reintentar</button
                             >
                             <button
+                                type="button"
                                 class="btn btn-primary text-sm px-6 font-semibold"
                                 onclick={confirmCrop}
                                 >Confirmar Escáner</button
@@ -473,6 +537,7 @@
                 {:else if !selectedFile}
                     <!-- Drop area -->
                     <div
+                        role="presentation"
                         class="border-2 border-dashed rounded-xl p-8 text-center flex flex-col items-center justify-center transition-colors {isDragging
                             ? 'border-brand-500 bg-brand-500/10'
                             : 'border-surface-glass-border hover:border-brand-500/50 hover:bg-white/5'}"
